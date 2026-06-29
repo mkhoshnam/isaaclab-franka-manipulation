@@ -1,6 +1,6 @@
 # Franka RL Manipulation for Isaac Lab
 
-This repository contains a Franka manipulation reinforcement learning setup for Isaac Lab using rsl_rl. The main environment is a long-horizon cabinet task that stages the problem into:
+This repository contains a polished research-oriented Franka manipulation reinforcement learning setup for Isaac Lab using rsl_rl. The main environment is a long-horizon cabinet task that stages the problem into:
 
 1. Opening a cabinet drawer.
 2. Reaching and grasping a cube.

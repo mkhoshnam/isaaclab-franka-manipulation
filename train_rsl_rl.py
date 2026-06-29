@@ -33,8 +33,11 @@ import torch  # noqa: E402
 from rsl_rl.runners import OnPolicyRunner  # noqa: E402
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # noqa: E402
 
-from franka_cabinet_place_env import FrankaCabinetPlaceEnv, FrankaCabinetPlaceEnvCfg  # noqa: E402
-from rsl_rl_ppo_cfg import FrankaCabinetPPORunnerCfg  # noqa: E402
+from franka_rl_manipulation.envs.franka_cabinet_place_env import (  # noqa: E402
+    FrankaCabinetPlaceEnv,
+    FrankaCabinetPlaceEnvCfg,
+)
+from franka_rl_manipulation.training.rsl_rl_ppo_cfg import FrankaCabinetPPORunnerCfg  # noqa: E402
 
 
 def main():
