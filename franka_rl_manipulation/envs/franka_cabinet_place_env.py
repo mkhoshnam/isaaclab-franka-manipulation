@@ -182,7 +182,7 @@ class FrankaCabinetPlaceEnvCfg(DirectRLEnvCfg):
     dist_reward_scale = 1.5      # gripper -> drawer handle
     rot_reward_scale = 1.5       # gripper/drawer axis alignment
     around_handle_reward_scale = 0.25  # bonus for fingers straddling the handle
-    open_reward_scale = 10.0     # drawer openness (coupled with being around handle)
+    open_reward_scale = 4.0      # drawer openness (smaller: was dwarfing the place signal)
     finger_reward_scale = 2.0    # fingers close to + straddling the handle (key for pulling)
     action_penalty_scale = 0.05
 
@@ -192,12 +192,14 @@ class FrankaCabinetPlaceEnvCfg(DirectRLEnvCfg):
     # episode also terminates on a fully-open drawer, exactly like the stock task.
     enable_place = False
     open_threshold = 0.20        # m, drawer "open enough" to switch to placing
-    reach_cube_scale = 2.0       # gripper -> cube
-    lift_scale = 10.0            # reward lifting the cube off the table once near it
-    place_scale = 4.0            # cube -> place target (inside drawer)
+    reach_cube_scale = 3.0       # gripper -> cube (wide-kernel pull)
+    grasp_scale = 1.0            # reward closing the gripper while at the cube
+    lift_scale = 4.0             # reward lifting the cube off the pedestal
+    place_scale = 3.0            # cube -> place target (wide-kernel pull)
     place_success_dist = 0.06    # m, cube counts as "inside"
-    place_bonus = 5.0
-    open_achieved_bonus = 2.0    # constant value of having the drawer open
+    place_bonus = 6.0
+    open_achieved_bonus = 2.0    # (no longer used in reward; kept for reference)
+    place_curriculum = 0.5       # fraction of envs that start already-open (place phase)
 
 
 class FrankaCabinetPlaceEnv(DirectRLEnv):
@@ -223,6 +225,7 @@ class FrankaCabinetPlaceEnv(DirectRLEnv):
         self.robot_dof_speed_scales[self._robot.find_joints("panda_finger_joint1")[0]] = 0.1
         self.robot_dof_speed_scales[self._robot.find_joints("panda_finger_joint2")[0]] = 0.1
         self.robot_dof_targets = torch.zeros((self.num_envs, self._robot.num_joints), device=self.device)
+        self._finger_dof_idx, _ = self._robot.find_joints(["panda_finger_joint1", "panda_finger_joint2"])
 
         # --- grasp frames (hand and drawer handle), taken from the stock task ---
         stage = get_current_stage()
@@ -373,29 +376,36 @@ class FrankaCabinetPlaceEnv(DirectRLEnv):
         # ---- place shaping (phase 2: only meaningful once the drawer is open) ----
         is_open = drawer_pos > self.cfg.open_threshold
         d_cube = torch.norm(self.robot_grasp_pos - self.cube_pos_w, dim=-1)
-        reach_cube = 1.0 - torch.tanh(d_cube / 0.10)
+        # wide kernel so the pull toward the cube is felt from across the workspace
+        reach_cube = 1.0 - torch.tanh(d_cube / 0.50)
         near_cube = (d_cube < 0.06).float()
-        # height of the cube above the table top -> rewards actually lifting it
+        # grasp signal: reward closing the gripper while at the cube
+        finger_pos = self._robot.data.joint_pos[:, self._finger_dof_idx].mean(dim=-1)
+        grasp = near_cube * torch.clamp((0.04 - finger_pos) / 0.04, 0.0, 1.0)
+        # height of the cube above the pedestal -> rewards actually lifting it
         cube_height = torch.clamp(self.cube_pos_w[:, 2] - self.cfg.table_height, min=0.0)
-        lift = self.cfg.lift_scale * torch.clamp(cube_height, max=0.25) * near_cube
+        lift = self.cfg.lift_scale * torch.clamp(cube_height, max=0.25)
         d_place = torch.norm(self.cube_pos_w - self.place_target_pos, dim=-1)
-        place_reward = 1.0 - torch.tanh(d_place / 0.15)
+        place_reward = 1.0 - torch.tanh(d_place / 0.50)
         placed_bonus = (d_place < self.cfg.place_success_dist).float()
 
         place_stage = (
             self.cfg.reach_cube_scale * reach_cube
+            + self.cfg.grasp_scale * grasp
             + lift
             + self.cfg.place_scale * place_reward
             + self.cfg.place_bonus * placed_bonus
         )
 
-        # Before open: reward opening (handle shaping). After open: DROP the handle
-        # shaping so the arm is free to leave the handle, and reward placing instead.
-        reward = openness - action_penalty + torch.where(
+        # KEY: once the drawer is open, the ONLY source of reward is the cube task.
+        # No openness, no "open achieved" bonus -> parking earns nothing, so the
+        # only way to gain reward is to go reach/grasp/lift/place the cube.
+        # Before open: reward opening (handle shaping + openness) to get there.
+        reward = torch.where(
             is_open,
-            place_stage + self.cfg.open_achieved_bonus,
-            gripper_to_handle,
-        )
+            place_stage,
+            gripper_to_handle + openness,
+        ) - action_penalty
         return reward
 
     # ---------------------------------------------------------------- reset
@@ -412,9 +422,18 @@ class FrankaCabinetPlaceEnv(DirectRLEnv):
         self._robot.set_joint_position_target(joint_pos, env_ids=env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
 
-        # cabinet (closed)
-        zeros = torch.zeros((len(env_ids), self._cabinet.num_joints), device=self.device)
-        self._cabinet.write_joint_state_to_sim(zeros, zeros, env_ids=env_ids)
+        # cabinet. During PLACE training, a fraction of envs start with the drawer
+        # already open (place curriculum): the agent then spends lots of experience
+        # in the open state, where -- with no free reward -- the only way to earn
+        # anything is to go to the cube. This teaches "from open, do the cube task".
+        cab_pos = torch.zeros((len(env_ids), self._cabinet.num_joints), device=self.device)
+        cab_vel = torch.zeros_like(cab_pos)
+        if self.cfg.enable_place and self.cfg.place_curriculum > 0.0:
+            mask = torch.rand(len(env_ids), device=self.device) < self.cfg.place_curriculum
+            if mask.any():
+                opened = sample_uniform(0.25, 0.40, (int(mask.sum()),), self.device)
+                cab_pos[mask, self.drawer_joint_idx] = opened
+        self._cabinet.write_joint_state_to_sim(cab_pos, cab_vel, env_ids=env_ids)
 
         # cube: drop near the start pose with small xy noise
         cube_state = self._cube.data.default_root_state[env_ids].clone()

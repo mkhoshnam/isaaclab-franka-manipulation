@@ -33,11 +33,8 @@ import torch  # noqa: E402
 from rsl_rl.runners import OnPolicyRunner  # noqa: E402
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # noqa: E402
 
-from franka_rl_manipulation.envs.franka_cabinet_place_env import (  # noqa: E402
-    FrankaCabinetPlaceEnv,
-    FrankaCabinetPlaceEnvCfg,
-)
-from franka_rl_manipulation.training.rsl_rl_ppo_cfg import FrankaCabinetPPORunnerCfg  # noqa: E402
+from franka_cabinet_place_env import FrankaCabinetPlaceEnv, FrankaCabinetPlaceEnvCfg  # noqa: E402
+from rsl_rl_ppo_cfg import FrankaCabinetPPORunnerCfg  # noqa: E402
 
 
 def main():
@@ -46,6 +43,15 @@ def main():
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.seed = args_cli.seed
     env_cfg.enable_place = args_cli.enable_place
+
+    print("=" * 70)
+    print(f"[TASK] enable_place = {env_cfg.enable_place}  ->  "
+          f"{'PLACE reward ACTIVE (open + pick + place)' if env_cfg.enable_place else 'OPEN-ONLY (cube/place reward OFF)'}")
+    print("=" * 70)
+
+    
+    # Force Isaac Lab environment/device to match CLI device
+    env_cfg.sim.device = args_cli.device
 
     env = FrankaCabinetPlaceEnv(env_cfg, render_mode=None)
     device = env.device
